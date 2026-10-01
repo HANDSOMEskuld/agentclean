@@ -10,14 +10,13 @@ use std::{
 fn fixture(name: &str) -> PathBuf {
     static HOME: Once = Once::new();
     HOME.call_once(|| {
-        std::env::set_var(
-            "HOME",
-            "/root/.hermes/cache/scratch/agentclean-isolated-home",
-        )
+        let home = std::env::temp_dir().join("agentclean-isolated-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", home);
     });
     tempfile::Builder::new()
         .prefix(&format!("agentclean-purge-{name}-"))
-        .tempdir_in("/root/.hermes/cache/scratch")
+        .tempdir()
         .unwrap()
         .keep()
 }
