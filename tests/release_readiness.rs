@@ -340,8 +340,9 @@ fn isolated_home_detects_claude_codex_hermes_and_developer_cache() {
 #[test]
 fn cli_analyze_loads_explicit_rules_and_reports_risk() {
     let fixture = tempfile::tempdir_in("/var/tmp").unwrap();
+    let rules_fixture = tempfile::tempdir_in("/var/tmp").unwrap();
     let file = fixture.path().join("cache.bin");
-    let rules = fixture.path().join("rules.yml");
+    let rules = rules_fixture.path().join("rules.yml");
     fs::write(&file, b"safe").unwrap();
     fs::write(
         &rules,
@@ -368,5 +369,12 @@ fn cli_analyze_loads_explicit_rules_and_reports_risk() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["findings"][0]["risk"], "safe");
+    let finding = json["findings"]
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|f| f["path"].as_str() == Some(file.to_str().unwrap()))
+        })
+        .expect("finding for cache.bin not found");
+    assert_eq!(finding["risk"], "safe");
 }
