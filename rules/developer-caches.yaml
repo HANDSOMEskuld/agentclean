@@ -1,0 +1,72 @@
+# External developer-cache rules. These are intentionally narrow and conservative.
+version: 1
+rules:
+  - id: dev.npm-cache
+    sources: [https://docs.npmjs.com/cli/v9/configuring-npm/folders/, https://docs.npmjs.com/cli/v8/commands/npm-cache/]
+    paths: ["${NPM_CONFIG_CACHE:-$HOME/.npm}", "${LocalAppData:-}/npm-cache"]
+    description: npm content-addressable HTTP/package cache; node_modules and prefix are not cache.
+    risk: caution
+    rebuildable: true
+    min_age_days: 30
+    cleanup_policy: tool_aware_only
+    exclusions: [_cacache, _logs, node_modules, bin, lib, auth, config]
+
+  - id: dev.pip-cache
+    sources: [https://pip.pypa.io/en/stable/topics/caching/, https://pip.pypa.io/en/stable/cli/pip_cache/]
+    paths: ["${PIP_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pip}", "${LocalAppData:-}/pip/Cache", "$HOME/Library/Caches/pip"]
+    description: pip HTTP and wheel cache; internal layout is version-sensitive.
+    risk: caution
+    rebuildable: true
+    min_age_days: 30
+    cleanup_policy: tool_aware_only
+    exclusions: ["*"]
+
+  - id: dev.cargo-cache
+    sources: [https://doc.rust-lang.org/cargo/guide/cargo-home.html]
+    paths: ["${CARGO_HOME:-$HOME/.cargo}/registry/cache", "${CARGO_HOME:-$HOME/.cargo}/registry/src", "${CARGO_HOME:-$HOME/.cargo}/registry/index", "${CARGO_HOME:-$HOME/.cargo}/git/db"]
+    description: Documented Cargo download/source cache leaves; Cargo Home also contains credentials, config, installed binaries, and metadata.
+    risk: caution
+    rebuildable: true
+    min_age_days: 60
+    cleanup_policy: tool_aware_only
+    exclusions: ["$HOME/.cargo/credentials.toml", config.toml, bin, .crates.toml, .crates2.json, git/checkouts]
+
+  - id: dev.go-module-cache
+    sources: [https://go.dev/ref/mod, https://pkg.go.dev/cmd/go#hdr-Environment_variables]
+    paths: ["${GOMODCACHE:-${GOPATH:-$HOME/go}/pkg/mod}"]
+    description: Go downloaded module cache; separate from GOCACHE build cache and GOPATH as a whole.
+    risk: caution
+    rebuildable: true
+    min_age_days: 60
+    cleanup_policy: tool_aware_only
+    exclusions: ["*"]
+
+  - id: dev.maven-artifacts
+    sources: [https://maven.apache.org/settings.html, https://maven.apache.org/guides/mini/guide-configuring-maven.html]
+    paths: ["${MAVEN_REPO_LOCAL:-$HOME/.m2/repository}"]
+    description: Maven local repository mixes downloaded dependencies/plugins with locally installed artifacts; settings may contain credentials.
+    risk: caution
+    rebuildable: true
+    min_age_days: 90
+    cleanup_policy: analysis_only
+    exclusions: ["$HOME/.m2/settings.xml", "$HOME/.m2/settings-security.xml", .lastUpdated, _remote.repositories]
+
+  - id: dev.gradle-dependency-cache
+    sources: [https://docs.gradle.org/current/userguide/directory_layout.html, https://docs.gradle.org/current/userguide/dependency_caching.html]
+    paths: ["${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2", "${GRADLE_USER_HOME:-$HOME/.gradle}/caches/build-cache-*"]
+    description: Gradle dependency/build cache leaves. Gradle User Home also contains daemon, JDK, wrapper, init scripts, and properties.
+    risk: caution
+    rebuildable: true
+    min_age_days: 60
+    cleanup_policy: tool_aware_only
+    exclusions: [daemon, init.d, jdks, wrapper, gradle.properties]
+
+  - id: dev.docker
+    sources: [https://docs.docker.com/engine/manage-resources/pruning/, https://docs.docker.com/reference/cli/docker/volume/prune/]
+    paths: ["${DOCKER_DATA_ROOT:-/var/lib/docker}"]
+    description: Docker object store; volumes and mounted/application data are never generic cache.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: analysis_only
+    exclusions: [volumes, containers, overlay2, image, network, buildkit]

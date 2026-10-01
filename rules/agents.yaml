@@ -1,0 +1,110 @@
+# External, conservative rules. Paths are documentation inputs for analysis;
+# cleanup must independently revalidate against docs/CORE_CONTRACT.md.
+version: 1
+rules:
+  - id: agents.claude-code
+    sources:
+      - https://docs.anthropic.com/en/docs/claude-code/settings
+      - https://docs.anthropic.com/en/docs/claude-code/cli-reference
+    paths:
+      - "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      - "$HOME/.claude.json"
+    description: Claude Code settings, plugins, memory, transcripts, history, and project state.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [settings.json, settings.local.json, CLAUDE.md, projects, plugins, history.jsonl, backups, auth, sessions]
+
+  - id: agents.codex-cli
+    sources:
+      - https://github.com/openai/codex/blob/main/docs/config.md
+      - https://github.com/openai/codex/discussions/23680
+    paths:
+      - "${CODEX_HOME:-$HOME/.codex}"
+    description: Codex home mixes config, authentication, logs, state databases, and session rollout files.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [auth.json, config.toml, sessions, archived_sessions, logs, "*.sqlite", "*.db"]
+
+  - id: agents.hermes
+    sources:
+      - https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md
+      - https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/profiles.md
+    paths:
+      - "${HERMES_HOME:-$HOME/.hermes}"
+    description: Hermes home contains profile state, SQLite sessions/messages, auth/config, memories, logs, skills, sandboxes, and caches.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [state.db, "state.db-wal", "state.db-shm", profiles, sessions, logs, auth, config, memories, skills, sandboxes, runtime, cache, scratch]
+
+  - id: agents.cline
+    sources:
+      - https://docs.cline.bot/getting-started/config
+      - https://docs.cline.bot/core-workflows/checkpoints
+    paths:
+      - "${CLINE_DATA_DIR:-$HOME/.cline/data}"
+      - "${CLINE_SANDBOX_DATA_DIR:-$HOME/.cline/sandbox}"
+    description: Cline file-backed settings, secrets, task history, conversation logs, and checkpoint/shadow-repository state.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [secrets, tasks, checkpoints, history, logs, workspace]
+
+  - id: agents.aider
+    sources:
+      - https://aider.chat/docs/config/options.html
+    paths:
+      - "$PWD/.aider.chat.history.md"
+      - "$PWD/.aider.conf.yml"
+    description: Aider project-local chat history and configuration.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [".aider.chat.history.md", ".aider.conf.yml"]
+
+  - id: agents.gemini-cli
+    sources:
+      - https://geminicli.com/docs/reference/configuration/
+    paths:
+      - "$HOME/.gemini"
+    description: Gemini CLI settings, project-hashed shell history, and temporary/session state.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [settings.json, tmp, shell_history, logs]
+
+  - id: agents.opencode
+    sources:
+      - https://opencode.ai/docs/config/
+      - https://opencode.ai/docs/cli/
+    paths:
+      - "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+    description: OpenCode configuration and plugin/instruction state; database path must be obtained from the installed CLI.
+    risk: dangerous
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: never
+    exclusions: [config.json, AGENTS.md, plugins, db, sessions]
+
+  - id: agents.cursor
+    sources:
+      - https://cursor.com/docs
+      - https://cursor.com/data-use
+    paths:
+      - "$HOME/.cursor"
+      - "${APPDATA:-}/Cursor"
+      - "${XDG_DATA_HOME:-$HOME/.local/share}/cursor"
+    description: Cursor local layout is not sufficiently specified by authoritative public docs and is version/platform sensitive.
+    risk: unknown
+    rebuildable: false
+    min_age_days: 3650
+    cleanup_policy: analysis_only
+    exclusions: ["*"]
