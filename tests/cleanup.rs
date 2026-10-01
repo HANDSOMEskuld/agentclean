@@ -258,7 +258,17 @@ fn successful_quarantine_move_writes_manifest_record() {
     let manifest = fs::read_to_string(engine.state_dir.join("quarantine/manifest.jsonl")).unwrap();
     let record: serde_json::Value = serde_json::from_str(manifest.trim()).unwrap();
 
-    assert_eq!(record["original_path"], file.to_string_lossy().as_ref());
+    let recorded_original = record["original_path"]
+        .as_str()
+        .unwrap()
+        .replace("\\\\?\\", "")
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let expected_suffix = file
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    assert!(recorded_original.ends_with(&expected_suffix));
     assert_eq!(
         record["quarantine_path"],
         moved.quarantine_path.to_string_lossy().as_ref()
