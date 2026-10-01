@@ -614,11 +614,9 @@ impl CleanupEngine {
             ));
         }
         if canon == Path::new("/")
-            || home.as_ref().is_some_and(|h| {
-                canon == *h
-                    || canon.starts_with(h)
-                    || h.parent().is_some_and(|parent| canon == parent)
-            })
+            || home
+                .as_ref()
+                .is_some_and(|h| canon == *h || h.parent().is_some_and(|parent| canon == parent))
         {
             return Err(CleanupError(
                 "root, home, or home parent/descendant refused".into(),
@@ -629,6 +627,14 @@ impl CleanupEngine {
             return Err(CleanupError(
                 "path is not an explicitly known cache leaf".into(),
             ));
+        }
+        if canon.file_name().is_some_and(|name| name == "data")
+            && canon
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "project")
+        {
+            return Err(CleanupError("generic project data path refused".into()));
         }
         Ok(canon)
     }

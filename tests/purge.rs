@@ -3,22 +3,14 @@ use agentclean::core::cleanup::{CleanupEngine, PurgeOptions, Risk, MIN_RETENTION
 use std::{
     fs,
     path::PathBuf,
-    sync::Once,
     time::{Duration, SystemTime},
 };
 
 fn fixture(name: &str) -> PathBuf {
-    static HOME: Once = Once::new();
-    HOME.call_once(|| {
-        let home = std::env::temp_dir().join("agentclean-isolated-home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::env::set_var("HOME", home);
-    });
-    tempfile::Builder::new()
-        .prefix(&format!("agentclean-purge-{name}-"))
-        .tempdir()
-        .unwrap()
-        .keep()
+    let p = std::env::temp_dir().join(format!("agentclean-purge-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&p);
+    fs::create_dir_all(&p).unwrap();
+    p
 }
 fn moved(name: &str) -> (PathBuf, CleanupEngine, cleanup::JournalEntry) {
     let root = fixture(name);

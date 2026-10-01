@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 fn fixture(name: &str) -> PathBuf {
-    let p = PathBuf::from("/var/tmp").join(format!("agentclean-{name}-{}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("agentclean-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&p);
     fs::create_dir_all(&p).unwrap();
     p
