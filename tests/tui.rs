@@ -13,6 +13,7 @@ fn report() -> ScanReport {
             bytes: 42,
             apparent_bytes: 42,
             allocated_bytes: 42,
+            reclaimable_allocated_bytes: 42,
             modified_secs: 1_700_000_000,
             age_secs: Some(1),
             risk: Risk::Caution,
@@ -25,6 +26,8 @@ fn report() -> ScanReport {
         scanned_files: 1,
         status: ScanStatus::Complete,
         duration_ms: 1,
+        scanned_apparent_bytes: 42,
+        scanned_allocated_bytes: 42,
     }
 }
 

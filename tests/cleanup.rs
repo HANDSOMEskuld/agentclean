@@ -1,5 +1,4 @@
-#[path = "../src/core/cleanup.rs"]
-mod cleanup;
+use agentclean::core::cleanup;
 
 use cleanup::{CandidateResult, CleanupEngine, OperationResult, Risk};
 use std::fs;

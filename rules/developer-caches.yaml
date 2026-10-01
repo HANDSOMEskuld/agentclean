@@ -8,7 +8,7 @@ rules:
     risk: caution
     rebuildable: true
     min_age_days: 30
-    cleanup_policy: tool_aware_only
+    cleanup_strategy: tool_aware_only
     exclusions: [_cacache, _logs, node_modules, bin, lib, auth, config]
 
   - id: dev.pip-cache
@@ -18,7 +18,7 @@ rules:
     risk: caution
     rebuildable: true
     min_age_days: 30
-    cleanup_policy: tool_aware_only
+    cleanup_strategy: tool_aware_only
     exclusions: ["*"]
 
   - id: dev.cargo-cache
@@ -28,7 +28,7 @@ rules:
     risk: caution
     rebuildable: true
     min_age_days: 60
-    cleanup_policy: tool_aware_only
+    cleanup_strategy: tool_aware_only
     exclusions: ["$HOME/.cargo/credentials.toml", config.toml, bin, .crates.toml, .crates2.json, git/checkouts]
 
   - id: dev.go-module-cache
@@ -38,7 +38,7 @@ rules:
     risk: caution
     rebuildable: true
     min_age_days: 60
-    cleanup_policy: tool_aware_only
+    cleanup_strategy: tool_aware_only
     exclusions: ["*"]
 
   - id: dev.maven-artifacts
@@ -58,7 +58,7 @@ rules:
     risk: caution
     rebuildable: true
     min_age_days: 60
-    cleanup_policy: tool_aware_only
+    cleanup_strategy: tool_aware_only
     exclusions: [daemon, init.d, jdks, wrapper, gradle.properties]
 
   - id: dev.docker

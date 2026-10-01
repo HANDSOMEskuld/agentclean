@@ -32,9 +32,11 @@ enum Command {
     Agents(OutputArgs),
     Config(ConfigArgs),
     Clean(CleanArgs),
+    Purge(PurgeArgs),
     Docker(OutputArgs),
     History(StateArgs),
     Restore(RestoreArgs),
+    Recover(RecoverArgs),
     Undo(StateArgs),
     Rules,
     Tui(Query),
@@ -85,10 +87,34 @@ struct CleanArgs {
     state_dir: PathBuf,
 }
 #[derive(Args, Clone)]
+struct PurgeArgs {
+    #[arg(long, default_value_os_t = default_state_dir())]
+    state_dir: PathBuf,
+    #[arg(long, default_value = "7")]
+    retention_days: u64,
+    #[arg(long)]
+    execute: bool,
+    #[arg(long)]
+    yes: bool,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Clone)]
 struct RestoreArgs {
     id: String,
     #[arg(long, default_value_os_t = default_state_dir())]
     state_dir: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Clone)]
+struct RecoverArgs {
+    #[arg(long, default_value_os_t = default_state_dir())]
+    state_dir: PathBuf,
+    #[arg(long)]
+    execute: bool,
+    #[arg(long)]
+    yes: bool,
     #[arg(long)]
     json: bool,
 }
@@ -117,6 +143,8 @@ struct AnalyzeData {
     scanned_bytes: u64,
     errors: Vec<String>,
     findings: Vec<agentclean::model::Finding>,
+    status: agentclean::model::ScanStatus,
+    space: serde_json::Value,
 }
 #[derive(Serialize)]
 struct InspectData {
@@ -146,6 +174,8 @@ struct Agent {
     paths: Vec<PathBuf>,
     entries: Vec<agentclean::agents::AgentEntry>,
     notes: String,
+    observed_apparent_bytes: u64,
+    by_category: BTreeMap<String, serde_json::Value>,
 }
 #[derive(Serialize)]
 struct AgentsData {
@@ -161,9 +191,11 @@ fn main() -> Result<()> {
         Command::Agents(q) => agents(q),
         Command::Config(q) => config(q),
         Command::Clean(q) => clean(q),
+        Command::Purge(q) => purge(q),
         Command::Docker(q) => docker(q),
         Command::History(q) => history(q),
         Command::Restore(q) => restore(q),
+        Command::Recover(q) => recover(q),
         Command::Undo(q) => undo(q),
         Command::Rules => {
             println!("Rules are loaded from the library API; no rule editor is provided.");
@@ -180,6 +212,51 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+fn recover(q: RecoverArgs) -> Result<()> {
+    let engine = agentclean::core::cleanup::CleanupEngine::new(q.state_dir)?;
+    let report = engine
+        .recovery_report()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if q.execute && !q.yes {
+        anyhow::bail!("refusing recovery without --yes; review the read-only report first")
+    }
+    if q.execute && q.yes && !report.blocked.is_empty() {
+        anyhow::bail!("refusing recovery while ambiguous entries are blocked")
+    }
+    let applied = if q.execute && q.yes {
+        engine
+            .repair_recovery(&report)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    } else {
+        agentclean::core::cleanup::RecoveryReport::default()
+    };
+    if q.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "command": "recover",
+                "dry_run": !(q.execute && q.yes),
+                "repairable": report.repairable.iter().map(|i| serde_json::json!({"id": i.id, "result": format!("{:?}", i.result), "action": format!("{:?}", i.action), "reason": i.reason})).collect::<Vec<_>>(),
+                "blocked": report.blocked.iter().map(|i| serde_json::json!({"id": i.id, "result": format!("{:?}", i.result), "reason": i.reason})).collect::<Vec<_>>(),
+                "applied": applied.repairable.iter().map(|i| serde_json::json!({"id": i.id, "result": format!("{:?}", i.result), "reason": i.reason})).collect::<Vec<_>>(),
+            })
+        );
+    } else {
+        println!("Recovery inspection (read-only by default)");
+        println!("Repairable: {}", report.repairable.len());
+        println!("Blocked: {}", report.blocked.len());
+        for item in report.repairable.iter().chain(report.blocked.iter()) {
+            println!("{}: {}", item.id, item.reason);
+        }
+        if q.execute && q.yes {
+            println!("Applied repairs: {}", applied.repairable.len());
+        } else {
+            println!("Dry run: no journal or file state was modified.");
+        }
+    }
+    Ok(())
+}
+
 fn history(q: StateArgs) -> Result<()> {
     let entries = agentclean::history::read(&q.state_dir)?;
     if q.json {
@@ -248,7 +325,39 @@ fn scan(q: Query, command: &'static str) -> Result<()> {
         ScanOptions::default()
     };
     let r = agentclean::scan::scan_path(&q.path, &options)?;
+    let mut by_risk = BTreeMap::<String, serde_json::Value>::new();
+    for risk in [
+        agentclean::model::Risk::Safe,
+        agentclean::model::Risk::Caution,
+        agentclean::model::Risk::Dangerous,
+        agentclean::model::Risk::Protected,
+        agentclean::model::Risk::Unknown,
+    ] {
+        let key = serde_json::to_value(risk)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+        let files: Vec<_> = r.files.iter().filter(|f| f.risk == risk).collect();
+        by_risk.insert(
+            key,
+            serde_json::json!({
+                "files": files.len(),
+                "apparent_bytes": files.iter().map(|f| f.apparent_bytes).sum::<u64>(),
+                "allocated_bytes": files.iter().map(|f| f.allocated_bytes).sum::<u64>(),
+            }),
+        );
+    }
+    let space = serde_json::json!({
+        "apparent_bytes": r.total_apparent_bytes(),
+        "allocated_bytes": r.total_allocated_bytes(),
+        "reclaimable_allocated_bytes": r.total_reclaimable_allocated_bytes(),
+        "quarantine_freed_bytes": 0,
+        "by_risk": by_risk,
+        "note": "Allocated bytes are observed blocks, not a promise of free-space increase; shared extents and open handles may defer release.",
+    });
     let data = AnalyzeData {
+        status: r.status,
+        space,
         root: r.root,
         scanned_files: r.scanned_files,
         scanned_bytes: r.scanned_bytes,
@@ -349,10 +458,73 @@ fn clean(q: CleanArgs) -> Result<()> {
             anyhow::bail!("refusing execution without --yes; review the plan first")
         }
         let ids = plan.execute(q.state_dir)?;
-        eprintln!("Quarantined {} item(s); freed bytes: 0", ids.len());
+        eprintln!(
+            "Quarantined {} item(s); disk freed: 0 (quarantine is reversible; use purge after retention)",
+            ids.len()
+        );
     }
     Ok(())
 }
+fn purge(q: PurgeArgs) -> Result<()> {
+    let engine = agentclean::core::cleanup::CleanupEngine::new(q.state_dir)?;
+    let retention = std::time::Duration::from_secs(
+        q.retention_days
+            .checked_mul(24 * 60 * 60)
+            .ok_or_else(|| anyhow::anyhow!("retention is too large"))?,
+    );
+    let plan = engine
+        .plan_purge(&[], retention)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if q.execute && !q.yes {
+        anyhow::bail!("refusing purge without --yes; review the dry-run plan first")
+    }
+    let report = engine
+        .execute_purge(&plan, q.execute && q.yes)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if q.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "command": "purge",
+                "dry_run": report.dry_run,
+                "retention_days": q.retention_days,
+                "eligible": plan.entries.len(),
+                "blocked": plan.blocked.iter().map(|b| serde_json::json!({"id": b.id, "reason": b.reason})).collect::<Vec<_>>(),
+                "purged_ids": report.purged_ids,
+                "logical_bytes": report.logical_bytes,
+                "allocated_bytes": report.allocated_bytes,
+                "unlinked_bytes": report.unlinked_bytes,
+                "free_bytes_before": report.free_bytes_before,
+                "free_bytes_after": report.free_bytes_after,
+                "observed_free_bytes": report.observed_free_bytes,
+            })
+        );
+    } else {
+        println!("Purge plan");
+        println!("Retention: {} days", q.retention_days);
+        println!("Eligible: {}", plan.entries.len());
+        println!("Blocked: {}", plan.blocked.len());
+        println!("Logical bytes: {}", report.logical_bytes);
+        println!("Allocated bytes: {}", report.allocated_bytes);
+        println!("Unlinked bytes: {}", report.unlinked_bytes);
+        match (report.free_bytes_before, report.free_bytes_after) {
+            (Some(before), Some(after)) => println!(
+                "Observed filesystem free bytes: before={}, after={}, delta={}",
+                before,
+                after,
+                report.observed_free_bytes.unwrap_or(0)
+            ),
+            _ => println!("Observed filesystem free bytes: unavailable"),
+        }
+        if report.dry_run {
+            println!("Dry run: no files were modified.");
+        } else {
+            println!("Purged: {}", report.purged_ids.len());
+        }
+    }
+    Ok(())
+}
+
 fn docker(q: OutputArgs) -> Result<()> {
     let report = agentclean::docker::analyze(std::time::Duration::from_secs(5));
     if q.json {
@@ -437,6 +609,17 @@ fn agents(q: OutputArgs) -> Result<()> {
         agents: detected
             .iter()
             .map(|a| Agent {
+                observed_apparent_bytes: a.entries.iter().map(|e| e.size).sum(),
+                by_category: {
+                    let mut totals = BTreeMap::<String, (u64, u64)>::new();
+                    for e in &a.entries {
+                        let key = serde_json::to_value(e.kind).unwrap_or_default().as_str().unwrap_or("unknown").to_owned();
+                        let total = totals.entry(key).or_default();
+                        total.0 += 1;
+                        total.1 = total.1.saturating_add(e.size);
+                    }
+                    totals.into_iter().map(|(key, (files, apparent_bytes))| (key, serde_json::json!({"files": files, "apparent_bytes": apparent_bytes}))).collect()
+                },
                 name: a.name.clone(),
                 detected: a.detected,
                 paths: a.roots.clone(),

@@ -59,7 +59,22 @@ pub fn detect_agents() -> Vec<AgentReport> {
     let hermes = env::var_os("HERMES_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".hermes"));
-    detect_agents_from(&home, &config, &cache, &data, &state, &hermes)
+    let claude_config = env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    detect_agents_from_with_overrides(
+        &home,
+        &config,
+        &cache,
+        &data,
+        &state,
+        &hermes,
+        &claude_config,
+        &codex_home,
+    )
 }
 
 pub fn detect_agents_from(
@@ -70,11 +85,35 @@ pub fn detect_agents_from(
     state: &Path,
     hermes: &Path,
 ) -> Vec<AgentReport> {
+    detect_agents_from_with_overrides(
+        home,
+        config,
+        cache,
+        data,
+        state,
+        hermes,
+        &home.join(".claude"),
+        &home.join(".codex"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn detect_agents_from_with_overrides(
+    home: &Path,
+    config: &Path,
+    cache: &Path,
+    data: &Path,
+    state: &Path,
+    hermes: &Path,
+    claude_config: &Path,
+    codex_home: &Path,
+) -> Vec<AgentReport> {
     vec![
         detect_one(
             "claude",
             vec![
-                home.join(".claude"),
+                claude_config.to_path_buf(),
+                home.join(".claude.json"),
                 config.join("claude"),
                 cache.join("claude"),
                 data.join("claude"),
@@ -85,7 +124,7 @@ pub fn detect_agents_from(
         detect_one(
             "codex",
             vec![
-                home.join(".codex"),
+                codex_home.to_path_buf(),
                 config.join("codex"),
                 cache.join("codex"),
                 data.join("codex"),
@@ -108,10 +147,10 @@ pub fn detect_agents_from(
 }
 
 fn detect_one(name: &str, roots: Vec<PathBuf>, hermes: bool) -> AgentReport {
-    let detected = roots.iter().any(|root| root.is_dir());
+    let detected = roots.iter().any(|root| root.is_dir() || root.is_file());
     let mut entries = Vec::new();
     for root in &roots {
-        if !root.is_dir() {
+        if !root.is_dir() && !root.is_file() {
             continue;
         }
         for item in WalkDir::new(root)
@@ -129,7 +168,7 @@ fn detect_one(name: &str, roots: Vec<PathBuf>, hermes: bool) -> AgentReport {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let kind = classify(path);
+            let kind = classify(path.strip_prefix(root).unwrap_or(path));
             let protected = matches!(
                 kind,
                 EntryKind::Credentials
@@ -162,70 +201,99 @@ fn detect_one(name: &str, roots: Vec<PathBuf>, hermes: bool) -> AgentReport {
 }
 
 fn classify(path: &Path) -> EntryKind {
-    let text = path.to_string_lossy().to_ascii_lowercase();
-    let name = path
-        .file_name()
-        .and_then(|x| x.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let name = components.last().map(String::as_str).unwrap_or_default();
+    let has_dir = |names: &[&str]| {
+        components[..components.len().saturating_sub(1)]
+            .iter()
+            .any(|component| names.contains(&component.as_str()))
+    };
+
     if [
-        "credentials",
-        "credential",
+        ".env",
         "auth",
+        "auth.json",
+        "auth.toml",
+        "credentials",
+        "credentials.json",
+        "credentials.toml",
+        "secrets",
         "token",
         "tokens",
-        "secrets",
         "api_keys",
         "apikeys",
     ]
-    .iter()
-    .any(|x| name.contains(x))
+    .contains(&name)
     {
         EntryKind::Credentials
-    } else if ["config", "settings", "providers", "gateway"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
+    } else if [
+        ".claude.json",
+        "config",
+        "config.json",
+        "config.toml",
+        "settings.json",
+        "settings.local.json",
+        "settings.toml",
+        "providers.json",
+        "managed-settings.json",
+    ]
+    .contains(&name)
+        || has_dir(&["config", "providers", "gateway"])
     {
         EntryKind::Config
-    } else if ["session", "sessions", "conversation", "conversations"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
+    } else if ["session.jsonl", "conversation.jsonl"].contains(&name)
+        || has_dir(&["sessions", "projects", "conversations"])
     {
         EntryKind::Sessions
-    } else if ["history", "checkpoint", "snapshot"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
+    } else if ["history", "history.jsonl", "checkpoint", "snapshot"].contains(&name)
+        || has_dir(&["file-history", "checkpoints"])
     {
         EntryKind::History
-    } else if ["log", "logs", "debug"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
+    } else if ["log", "logs", "debug"].contains(&name)
+        || name.ends_with(".log")
+        || has_dir(&["logs", "debug"])
     {
         EntryKind::Logs
-    } else if ["cache", "caches", "tmp", "temp", "temporary"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
-    {
-        if name.contains("tmp") || name.contains("temp") {
-            EntryKind::Temporary
-        } else {
-            EntryKind::Cache
-        }
-    } else if ["project", "metadata"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
-    {
-        EntryKind::ProjectMetadata
-    } else if ["workspace", "workspaces"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
-    {
-        EntryKind::Workspace
-    } else if ["state", "data"]
-        .iter()
-        .any(|x| name.contains(x) || text.contains(&format!("/{x}/")))
+    } else if has_dir(&["tmp", "temp", "temporary"]) {
+        EntryKind::Temporary
+    } else if [
+        "state",
+        "state.db",
+        "state.db-wal",
+        "state.db-shm",
+        "kanban.db",
+        "gateway_state.json",
+        "pid",
+        "lock",
+        "sock",
+    ]
+    .contains(&name)
+        || has_dir(&["state", "runtime"])
     {
         EntryKind::State
+    } else if [
+        "cache",
+        "caches",
+        "paste-cache",
+        "image-cache",
+        "audio_cache",
+        "scratch",
+    ]
+    .contains(&name)
+        || has_dir(&["cache", "caches", "scratch"])
+    {
+        EntryKind::Cache
+    } else if ["project", "metadata"].contains(&name) {
+        EntryKind::ProjectMetadata
+    } else if ["workspace", "workspaces", "skills", "memories"].contains(&name)
+        || has_dir(&["workspace", "workspaces", "skills", "memories"])
+        || ["soul.md", "claude.md", "agents.md"].contains(&name)
+    {
+        EntryKind::Workspace
     } else {
         EntryKind::Unknown
     }

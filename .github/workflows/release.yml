@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            binary: agentclean
+            archive: agentclean-linux-x86_64.tar.gz
+          - name: macos-x86_64
+            os: macos-13
+            binary: agentclean
+            archive: agentclean-macos-x86_64.tar.gz
+          - name: macos-aarch64
+            os: macos-latest
+            binary: agentclean
+            archive: agentclean-macos-aarch64.tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            binary: agentclean.exe
+            archive: agentclean-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          test "v${package_version}" = "${GITHUB_REF_NAME}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run locked tests
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="staging/agentclean-${{ matrix.name }}"
+          mkdir -p "$staging"
+          cp "target/release/${{ matrix.binary }}" "$staging/agentclean"
+          cp LICENSE README.md CHANGELOG.md "$staging/"
+          tar -C staging -czf "${{ matrix.archive }}" "agentclean-${{ matrix.name }}"
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "staging/agentclean-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "target/release/${{ matrix.binary }}" "$staging/agentclean.exe"
+          Copy-Item LICENSE, README.md, CHANGELOG.md $staging
+          Compress-Archive -Path $staging -DestinationPath "${{ matrix.archive }}"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release and checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: agentclean-*
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: dist
+        run: sha256sum agentclean-* > SHA256SUMS
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=true
+            title="AgentClean $TAG (release candidate)"
+          else
+            prerelease=false
+            title="AgentClean $TAG"
+          fi
+          gh release create "$TAG" dist/* \
+            --title "$title" \
+            --generate-notes \
+            $([[ "$prerelease" == true ]] && printf '%s' '--prerelease' || true)

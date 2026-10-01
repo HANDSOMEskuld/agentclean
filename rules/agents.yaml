@@ -13,8 +13,8 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
-    exclusions: [settings.json, settings.local.json, CLAUDE.md, projects, plugins, history.jsonl, backups, auth, sessions]
+    cleanup_strategy: never
+    exclusions: [settings.json, settings.local.json, CLAUDE.md, projects, plugins, history.jsonl, backups, auth, sessions, file-history, paste-cache, image-cache]
 
   - id: agents.codex-cli
     sources:
@@ -26,8 +26,8 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
-    exclusions: [auth.json, config.toml, sessions, archived_sessions, logs, "*.sqlite", "*.db"]
+    cleanup_strategy: never
+    exclusions: [auth.json, config.toml, sessions, archived_sessions, logs, "*.sqlite", "*.db", "*.db-wal", "*.db-shm"]
 
   - id: agents.hermes
     sources:
@@ -39,8 +39,8 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
-    exclusions: [state.db, "state.db-wal", "state.db-shm", profiles, sessions, logs, auth, config, memories, skills, sandboxes, runtime, cache, scratch]
+    cleanup_strategy: never
+    exclusions: [state.db, "state.db-wal", "state.db-shm", profiles, sessions, logs, auth, config, memories, skills, sandboxes, runtime, cache, scratch, .env, SOUL.md, cron, pairing, gateway]
 
   - id: agents.cline
     sources:
@@ -53,7 +53,7 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
+    cleanup_strategy: never
     exclusions: [secrets, tasks, checkpoints, history, logs, workspace]
 
   - id: agents.aider
@@ -66,7 +66,7 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
+    cleanup_strategy: never
     exclusions: [".aider.chat.history.md", ".aider.conf.yml"]
 
   - id: agents.gemini-cli
@@ -78,7 +78,7 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
+    cleanup_strategy: never
     exclusions: [settings.json, tmp, shell_history, logs]
 
   - id: agents.opencode
@@ -91,7 +91,7 @@ rules:
     risk: dangerous
     rebuildable: false
     min_age_days: 3650
-    cleanup_policy: never
+    cleanup_strategy: never
     exclusions: [config.json, AGENTS.md, plugins, db, sessions]
 
   - id: agents.cursor

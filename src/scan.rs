@@ -28,6 +28,10 @@ pub fn scan_path(root: &Path, options: &ScanOptions) -> Result<ScanReport> {
     if meta.file_type().is_symlink() {
         bail!("scan root may not be a symlink: {}", root.display());
     }
+    // Canonicalize once and enforce containment for every entry.  WalkDir does
+    // not follow symlinks, but a mount/bind mount or a path component changing
+    // during a scan must not turn a report into an out-of-root accounting claim.
+    let canonical_root = fs::canonicalize(root)?;
     let started = Instant::now();
     let mut out = ScanReport {
         root: root.to_path_buf(),
@@ -68,7 +72,29 @@ pub fn scan_path(root: &Path, options: &ScanOptions) -> Result<ScanReport> {
             continue;
         }
         let path = entry.path();
-        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical = match fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(e) => {
+                out.errors.push(format!("{}: {}", path.display(), e));
+                out.status = ScanStatus::Partial;
+                if entry.file_type().is_dir() {
+                    it.skip_current_dir();
+                }
+                continue;
+            }
+        };
+        if !canonical.starts_with(&canonical_root) {
+            out.errors.push(format!(
+                "path escaped scan root: {} -> {}",
+                path.display(),
+                canonical.display()
+            ));
+            out.status = ScanStatus::Partial;
+            if entry.file_type().is_dir() {
+                it.skip_current_dir();
+            }
+            continue;
+        }
         if excluded
             .iter()
             .any(|x| canonical == *x || canonical.starts_with(x))
@@ -100,6 +126,13 @@ pub fn scan_path(root: &Path, options: &ScanOptions) -> Result<ScanReport> {
             continue;
         }
         let bytes = md.len();
+        let allocated = allocated_bytes(&md);
+        // A hard-linked inode remains allocated through its other links.
+        let reclaimable_allocated = if hard_link_count(&md) == 1 {
+            allocated
+        } else {
+            0
+        };
         let modified = md
             .modified()
             .ok()
@@ -130,12 +163,16 @@ pub fn scan_path(root: &Path, options: &ScanOptions) -> Result<ScanReport> {
         }
         out.scanned_files += 1;
         out.scanned_bytes = out.scanned_bytes.saturating_add(bytes);
-        let allocated = allocated_bytes(&md);
+        out.scanned_apparent_bytes = out.scanned_apparent_bytes.saturating_add(bytes);
+        out.scanned_allocated_bytes = out
+            .scanned_allocated_bytes
+            .saturating_add(reclaimable_allocated);
         out.files.push(Finding {
             path: path.to_path_buf(),
             bytes,
             apparent_bytes: bytes,
             allocated_bytes: allocated,
+            reclaimable_allocated_bytes: reclaimable_allocated,
             modified_secs: modified,
             age_secs: md
                 .modified()
@@ -157,6 +194,17 @@ pub fn scan_path(root: &Path, options: &ScanOptions) -> Result<ScanReport> {
     }
     out.duration_ms = started.elapsed().as_millis();
     Ok(out)
+}
+#[cfg(unix)]
+fn hard_link_count(md: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    md.nlink()
+}
+#[cfg(not(unix))]
+fn hard_link_count(_: &fs::Metadata) -> u64 {
+    // There is no portable hard-link identity/count API in std.  Returning 1
+    // here would claim reclaimable space that may still be shared.
+    0
 }
 #[cfg(unix)]
 fn allocated_bytes(md: &fs::Metadata) -> u64 {

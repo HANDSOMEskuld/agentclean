@@ -50,8 +50,61 @@ pub enum OperationResult {
     Prepared,
     Moved,
     Restored,
+    PurgePending,
+    Purged,
     Refused(String),
     Failed(String),
+}
+
+pub const MIN_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+#[derive(Debug, Clone)]
+pub struct PurgePlan {
+    pub entries: Vec<JournalEntry>,
+    pub blocked: Vec<PurgeBlocked>,
+    pub retention: std::time::Duration,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+}
+#[derive(Debug, Clone)]
+pub struct PurgeBlocked {
+    pub id: String,
+    pub reason: String,
+}
+#[derive(Debug, Clone, Default)]
+pub struct PurgeOptions {
+    pub confirmed: bool,
+}
+#[derive(Debug, Clone)]
+pub struct PurgeReport {
+    pub dry_run: bool,
+    pub purged_ids: Vec<String>,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+    pub unlinked_bytes: u64,
+    pub free_bytes_before: Option<u64>,
+    pub free_bytes_after: Option<u64>,
+    pub observed_free_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAction {
+    AbortPrepared,
+    ResumePurgePending,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryItem {
+    pub id: String,
+    pub result: OperationResult,
+    pub action: Option<RecoveryAction>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryReport {
+    pub repairable: Vec<RecoveryItem>,
+    pub blocked: Vec<RecoveryItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +298,263 @@ impl CleanupEngine {
         Ok(out)
     }
 
+    pub fn plan_purge(&self, ids: &[String], retention: std::time::Duration) -> Result<PurgePlan> {
+        self.plan_purge_at(ids, retention, SystemTime::now())
+    }
+
+    pub fn plan_purge_at(
+        &self,
+        ids: &[String],
+        retention: std::time::Duration,
+        now: SystemTime,
+    ) -> Result<PurgePlan> {
+        if retention < MIN_RETENTION {
+            return Err(CleanupError("retention below minimum".into()));
+        }
+        let entries = self.read_entries()?;
+        let requested: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut terminal: HashSet<&str> = HashSet::new();
+        let mut eligible = Vec::new();
+        let mut blocked = Vec::new();
+        for e in entries.iter().rev() {
+            if !requested.is_empty() && !requested.contains(e.id.as_str()) {
+                continue;
+            }
+            if terminal.contains(e.id.as_str()) {
+                continue;
+            }
+            terminal.insert(&e.id);
+            match e.result {
+                OperationResult::Moved => {
+                    let age_ok = now.duration_since(UNIX_EPOCH).ok().is_some_and(|_| {
+                        now.duration_since(UNIX_EPOCH).unwrap_or_default()
+                            >= e.timestamp_duration() + retention
+                    });
+                    if age_ok {
+                        eligible.push(e.clone());
+                    } else {
+                        blocked.push(PurgeBlocked {
+                            id: e.id.clone(),
+                            reason: "minimum retention not met".into(),
+                        });
+                    }
+                }
+                OperationResult::PurgePending => blocked.push(PurgeBlocked {
+                    id: e.id.clone(),
+                    reason: "pending purge requires manual recovery".into(),
+                }),
+                OperationResult::Purged | OperationResult::Restored => blocked.push(PurgeBlocked {
+                    id: e.id.clone(),
+                    reason: "terminal entry is not purgeable".into(),
+                }),
+                _ => blocked.push(PurgeBlocked {
+                    id: e.id.clone(),
+                    reason: "entry is not a completed quarantine move".into(),
+                }),
+            }
+        }
+        let logical_bytes = eligible.iter().map(|e| e.size).sum();
+        let allocated_bytes = eligible
+            .iter()
+            .map(|e| quarantine_allocated_bytes(&e.quarantine_path).unwrap_or(0))
+            .sum();
+        Ok(PurgePlan {
+            entries: eligible,
+            blocked,
+            retention,
+            logical_bytes,
+            allocated_bytes,
+        })
+    }
+
+    pub fn execute_purge(&self, plan: &PurgePlan, confirmed: bool) -> Result<PurgeReport> {
+        let report = PurgeReport {
+            dry_run: !confirmed,
+            purged_ids: Vec::new(),
+            logical_bytes: plan.logical_bytes,
+            allocated_bytes: plan.allocated_bytes,
+            unlinked_bytes: 0,
+            free_bytes_before: None,
+            free_bytes_after: None,
+            observed_free_bytes: None,
+        };
+        if !confirmed {
+            return Ok(report);
+        }
+        let _lock = Lock::acquire(&self.state_dir)?;
+        let live = self.read_entries()?;
+        let mut validated = Vec::with_capacity(plan.entries.len());
+        for planned in &plan.entries {
+            if !valid_id(&planned.id) {
+                return Err(CleanupError("purge plan contains invalid id".into()));
+            }
+            let current = live
+                .iter()
+                .rev()
+                .find(|e| e.id == planned.id && matches!(e.result, OperationResult::Moved))
+                .ok_or_else(|| CleanupError("purge plan is stale or entry is terminal".into()))?;
+            if current.timestamp != planned.timestamp
+                || current.size != planned.size
+                || current.quarantine_path != planned.quarantine_path
+            {
+                return Err(CleanupError("purge plan identity changed".into()));
+            }
+            self.validate_quarantine_entry(current)?;
+            validated.push(current);
+        }
+        let free_before = filesystem_free_bytes(&self.state_dir);
+        let mut out = report;
+        out.free_bytes_before = free_before;
+        for current in validated {
+            let pending = JournalEntry {
+                result: OperationResult::PurgePending,
+                ..current.clone()
+            };
+            self.write_entry(&pending)?;
+            fs::remove_file(&current.quarantine_path)?;
+            sync_dir(&self.state_dir.join("quarantine"))?;
+            let done = JournalEntry {
+                result: OperationResult::Purged,
+                ..current.clone()
+            };
+            self.write_entry(&done)?;
+            out.purged_ids.push(current.id.clone());
+            out.unlinked_bytes = out.unlinked_bytes.saturating_add(current.size);
+        }
+        out.free_bytes_after = filesystem_free_bytes(&self.state_dir);
+        out.observed_free_bytes = match (out.free_bytes_before, out.free_bytes_after) {
+            (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+            _ => None,
+        };
+        Ok(out)
+    }
+
+    pub fn purge(&self, plan: &PurgePlan, options: PurgeOptions) -> Result<PurgeReport> {
+        self.execute_purge(plan, options.confirmed)
+    }
+
+    /// Read-only crash recovery inspection. Ambiguous states are blocked.
+    pub fn recovery_report(&self) -> Result<RecoveryReport> {
+        let entries = self.read_entries()?;
+        let mut seen = HashSet::new();
+        let mut report = RecoveryReport::default();
+        for entry in entries.iter().rev().filter(|e| seen.insert(e.id.clone())) {
+            match entry.result {
+                OperationResult::Prepared => {
+                    let source_ok = fs::symlink_metadata(&entry.original_path)
+                        .map(|m| {
+                            m.is_file() && !m.file_type().is_symlink() && m.len() == entry.size
+                        })
+                        .unwrap_or(false);
+                    let quarantine_exists = fs::symlink_metadata(&entry.quarantine_path).is_ok();
+                    if source_ok && !quarantine_exists {
+                        report.repairable.push(RecoveryItem {
+                            id: entry.id.clone(),
+                            result: OperationResult::Prepared,
+                            action: Some(RecoveryAction::AbortPrepared),
+                            reason: "source is intact and move did not occur".into(),
+                        });
+                    } else {
+                        report.blocked.push(RecoveryItem {
+                            id: entry.id.clone(),
+                            result: OperationResult::Prepared,
+                            action: None,
+                            reason: "prepared move has ambiguous source/quarantine state".into(),
+                        });
+                    }
+                }
+                OperationResult::PurgePending => match self.validate_quarantine_entry(entry) {
+                    Ok(()) => report.repairable.push(RecoveryItem {
+                        id: entry.id.clone(),
+                        result: OperationResult::PurgePending,
+                        action: Some(RecoveryAction::ResumePurgePending),
+                        reason: "verified quarantine entry was not unlinked".into(),
+                    }),
+                    Err(_) => report.blocked.push(RecoveryItem {
+                        id: entry.id.clone(),
+                        result: OperationResult::PurgePending,
+                        action: None,
+                        reason: "quarantine is missing or tampered; no repair is safe".into(),
+                    }),
+                },
+                OperationResult::Moved if self.validate_quarantine_entry(entry).is_err() => {
+                    report.blocked.push(RecoveryItem {
+                        id: entry.id.clone(),
+                        result: OperationResult::Moved,
+                        action: None,
+                        reason: "quarantine is missing or tampered; no repair is safe".into(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(report)
+    }
+
+    /// Apply only unambiguous, non-destructive recovery actions.
+    pub fn repair_recovery(&self, report: &RecoveryReport) -> Result<RecoveryReport> {
+        let _lock = Lock::acquire(&self.state_dir)?;
+        let live = self.read_entries()?;
+        let mut repaired = RecoveryReport::default();
+        for item in &report.repairable {
+            let current = live
+                .iter()
+                .rev()
+                .find(|e| e.id == item.id)
+                .ok_or_else(|| CleanupError("recovery plan is stale".into()))?;
+            match item.action {
+                Some(RecoveryAction::AbortPrepared)
+                    if matches!(current.result, OperationResult::Prepared) =>
+                {
+                    if fs::symlink_metadata(&current.quarantine_path).is_ok()
+                        || fs::symlink_metadata(&current.original_path)
+                            .map(|m| {
+                                m.file_type().is_symlink()
+                                    || !m.is_file()
+                                    || m.len() != current.size
+                            })
+                            .unwrap_or(true)
+                    {
+                        return Err(CleanupError("prepared recovery state changed".into()));
+                    }
+                    let closed = JournalEntry {
+                        result: OperationResult::Failed("recovery: move was not committed".into()),
+                        ..current.clone()
+                    };
+                    self.write_entry(&closed)?;
+                    repaired.repairable.push(RecoveryItem {
+                        id: closed.id,
+                        result: closed.result,
+                        action: None,
+                        reason: "prepared record closed without deleting data".into(),
+                    });
+                }
+                Some(RecoveryAction::ResumePurgePending)
+                    if matches!(current.result, OperationResult::PurgePending) =>
+                {
+                    self.validate_quarantine_entry(current)?;
+                    let restored = JournalEntry {
+                        result: OperationResult::Moved,
+                        ..current.clone()
+                    };
+                    self.write_entry(&restored)?;
+                    repaired.repairable.push(RecoveryItem {
+                        id: restored.id,
+                        result: restored.result,
+                        action: None,
+                        reason: "pending purge returned to quarantine state".into(),
+                    });
+                }
+                _ => return Err(CleanupError("recovery plan is stale or unsafe".into())),
+            }
+        }
+        Ok(repaired)
+    }
+
+    pub fn repair(&self, report: &RecoveryReport) -> Result<RecoveryReport> {
+        self.repair_recovery(report)
+    }
+
     pub fn restore(&self, id: &str) -> Result<JournalEntry> {
         if !valid_id(id) {
             return Err(CleanupError("invalid journal id".into()));
@@ -256,28 +566,16 @@ impl CleanupEngine {
             .rev()
             .find(|e| e.id == id && matches!(e.result, OperationResult::Moved))
             .ok_or_else(|| CleanupError("no movable journal entry".into()))?;
-        let raw_q_meta = fs::symlink_metadata(&moved.quarantine_path)
-            .map_err(|_| CleanupError("quarantine entry missing or tampered".into()))?;
-        if raw_q_meta.file_type().is_symlink() || !raw_q_meta.is_file() {
-            return Err(CleanupError(
-                "quarantine entry is not a regular file".into(),
-            ));
-        }
-        let qroot = fs::canonicalize(self.state_dir.join("quarantine"))?;
-        let q = fs::canonicalize(&moved.quarantine_path)
-            .map_err(|_| CleanupError("quarantine entry missing or tampered".into()))?;
-        if !q.starts_with(&qroot) || q == qroot {
-            return Err(CleanupError("quarantine confinement failed".into()));
-        }
-        let qm = fs::symlink_metadata(&q)?;
-        if qm.file_type().is_symlink() || !qm.is_file() || qm.len() != moved.size {
-            return Err(CleanupError("quarantine entry tampered".into()));
-        }
-        if moved.original_path.exists() {
-            return Err(CleanupError("restore refuses overwrite".into()));
-        }
+        self.validate_quarantine_entry(&moved)?;
+        let q = moved.quarantine_path.clone();
         self.validate_source_parent(&moved.original_path)?;
-        fs::rename(&q, &moved.original_path)?;
+        fs::hard_link(&q, &moved.original_path).map_err(|_| {
+            CleanupError("restore refuses overwrite or cross-device restore".into())
+        })?;
+        if let Err(e) = fs::remove_file(&q) {
+            let _ = fs::remove_file(&moved.original_path);
+            return Err(e.into());
+        }
         let restored = JournalEntry {
             result: OperationResult::Restored,
             ..moved
@@ -399,7 +697,8 @@ impl CleanupEngine {
         let line = encode(e);
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
-        f.sync_data()?;
+        f.sync_all()?;
+        sync_dir(&self.state_dir)?;
         Ok(())
     }
     fn write_manifest_entry(&self, e: &JournalEntry) -> Result<()> {
@@ -424,7 +723,8 @@ impl CleanupEngine {
         );
         f.write_all(record.as_bytes())?;
         f.write_all(b"\n")?;
-        f.sync_data()?;
+        f.sync_all()?;
+        sync_dir(&self.state_dir.join("quarantine"))?;
         Ok(())
     }
     fn read_entries(&self) -> Result<Vec<JournalEntry>> {
@@ -435,11 +735,49 @@ impl CleanupEngine {
         reject_existing_state_file(&p)?;
         let mut s = String::new();
         File::open(p)?.read_to_string(&mut s)?;
-        s.lines().map(decode).collect()
+        s.lines()
+            .map(|line| {
+                let e = decode(line)?;
+                self.validate_journal_entry(&e)?;
+                Ok(e)
+            })
+            .collect()
+    }
+
+    fn validate_journal_entry(&self, e: &JournalEntry) -> Result<()> {
+        if !valid_id(&e.id)
+            || e.original_path.as_os_str().is_empty()
+            || !e.original_path.is_absolute()
+            || e.timestamp == 0
+        {
+            return Err(CleanupError("hostile journal entry".into()));
+        }
+        let expected = self.state_dir.join("quarantine").join(&e.id);
+        if e.quarantine_path != expected || !e.quarantine_path.is_absolute() {
+            return Err(CleanupError("journal quarantine path escapes state".into()));
+        }
+        Ok(())
+    }
+
+    fn validate_quarantine_entry(&self, e: &JournalEntry) -> Result<()> {
+        self.validate_journal_entry(e)?;
+        reject_symlink_ancestors(&self.state_dir.join("quarantine"))?;
+        let meta = fs::symlink_metadata(&e.quarantine_path)
+            .map_err(|_| CleanupError("quarantine entry missing or tampered".into()))?;
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() != e.size {
+            return Err(CleanupError(
+                "quarantine identity revalidation failed".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
 impl JournalEntry {
+    fn timestamp_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.timestamp.min(u64::MAX as u128) as u64)
+    }
+
     fn failed(c: &Candidate, p: &Plan, msg: String) -> Self {
         Self {
             id: new_id(),
@@ -455,6 +793,53 @@ impl JournalEntry {
             quarantine_path: PathBuf::new(),
         }
     }
+}
+
+fn filesystem_free_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()?;
+        // SAFETY: statvfs initializes the provided struct on success; c_path is NUL-free.
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        if rc == 0 {
+            // SAFETY: rc==0 means stat was initialized by libc.
+            let stat = unsafe { stat.assume_init() };
+            Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn quarantine_allocated_bytes(path: &Path) -> Option<u64> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(metadata.blocks().saturating_mul(512))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(metadata.len())
+    }
+}
+
+fn sync_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 fn reject_symlink_ancestors(path: &Path) -> Result<()> {
@@ -556,6 +941,8 @@ fn result(r: &OperationResult) -> String {
         OperationResult::Prepared => "prepared".into(),
         OperationResult::Moved => "moved".into(),
         OperationResult::Restored => "restored".into(),
+        OperationResult::PurgePending => "purge_pending".into(),
+        OperationResult::Purged => "purged".into(),
         OperationResult::Refused(s) => format!("refused:{s}"),
         OperationResult::Failed(s) => format!("failed:{s}"),
     }
@@ -567,6 +954,10 @@ fn parse_result(s: &str) -> OperationResult {
         OperationResult::Moved
     } else if s == "restored" {
         OperationResult::Restored
+    } else if s == "purged" {
+        OperationResult::Purged
+    } else if s == "purge_pending" {
+        OperationResult::PurgePending
     } else if let Some(x) = s.strip_prefix("failed:") {
         OperationResult::Failed(x.into())
     } else {

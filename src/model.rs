@@ -33,6 +33,8 @@ pub struct Finding {
     pub bytes: u64,
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
+    #[serde(default)]
+    pub reclaimable_allocated_bytes: u64,
     pub modified_secs: u64,
     pub age_secs: Option<u64>,
     pub risk: Risk,
@@ -46,6 +48,9 @@ impl Finding {
     }
     pub fn allocated_bytes(&self) -> u64 {
         self.allocated_bytes
+    }
+    pub fn reclaimable_allocated_bytes(&self) -> u64 {
+        self.reclaimable_allocated_bytes
     }
     pub fn age_secs(&self) -> Option<u64> {
         self.age_secs
@@ -73,10 +78,27 @@ pub struct ScanReport {
     pub scanned_files: u64,
     pub status: ScanStatus,
     pub duration_ms: u128,
+    #[serde(default)]
+    pub scanned_apparent_bytes: u64,
+    #[serde(default)]
+    pub scanned_allocated_bytes: u64,
 }
 impl ScanReport {
     pub fn total_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.bytes).sum()
+    }
+    pub fn total_apparent_bytes(&self) -> u64 {
+        self.files.iter().map(|f| f.apparent_bytes).sum()
+    }
+    pub fn total_allocated_bytes(&self) -> u64 {
+        self.files.iter().map(|f| f.allocated_bytes).sum()
+    }
+    pub fn total_reclaimable_allocated_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|f| f.risk == Risk::Safe)
+            .map(|f| f.reclaimable_allocated_bytes)
+            .sum()
     }
     pub fn by_risk(&self, risk: Risk) -> u64 {
         self.files

@@ -39,6 +39,12 @@ pub struct CleanupPlan {
     pub files: u64,
     pub directories: u64,
     pub dry_run: bool,
+    #[serde(default)]
+    pub quarantine_apparent_bytes: u64,
+    #[serde(default)]
+    pub potential_reclaimable_allocated_bytes: u64,
+    #[serde(default)]
+    pub immediate_freed_bytes: u64,
 }
 
 fn is_protected_path(path: &std::path::Path) -> bool {
@@ -124,15 +130,28 @@ impl CleanupPlan {
                 blocked.push(item);
             }
         }
-        let total_reclaimable = items.iter().map(|i| i.expected_size).sum();
+        let quarantine_apparent_bytes = items.iter().map(|i| i.expected_size).sum();
+        let potential_reclaimable_allocated_bytes = items
+            .iter()
+            .filter_map(|item| {
+                report
+                    .files
+                    .iter()
+                    .find(|f| f.path == item.path)
+                    .map(|f| f.reclaimable_allocated_bytes)
+            })
+            .sum();
         Self {
             root: report.root.clone(),
             files: items.len() as u64,
             directories: 0,
-            total_reclaimable,
+            total_reclaimable: quarantine_apparent_bytes,
             items,
             blocked,
             dry_run,
+            quarantine_apparent_bytes,
+            potential_reclaimable_allocated_bytes,
+            immediate_freed_bytes: 0,
         }
     }
 
