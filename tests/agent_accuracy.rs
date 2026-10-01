@@ -40,7 +40,11 @@ fn kinds_for(name: &str) -> Vec<(String, EntryKind, bool)> {
         .into_iter()
         .map(|e| {
             (
-                e.path.strip_prefix(&root).unwrap().display().to_string(),
+                e.path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
                 e.kind,
                 e.protected,
             )
@@ -133,7 +137,15 @@ fn classification_uses_component_boundaries_and_protects_user_history() {
     let get = |path: &str| {
         entries
             .iter()
-            .find(|entry| entry.path.strip_prefix(&root).unwrap().to_str() == Some(path))
+            .find(|entry| {
+                entry
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    == path
+            })
             .unwrap()
     };
     assert_eq!(get("author.md").kind, EntryKind::Unknown);

@@ -6,7 +6,7 @@ use agentclean::{
 use std::fs;
 
 fn fixture() -> tempfile::TempDir {
-    tempfile::tempdir_in("/root/.hermes/cache/scratch").unwrap()
+    tempfile::tempdir().unwrap()
 }
 fn safe_options() -> ScanOptions {
     ScanOptions { rules: RuleSet::from_yaml("version: 1\nrules:\n  - id: fixture\n    pattern: '*'\n    risk: safe\n    cleanup_strategy: quarantine\n    rebuildable: true\n    min_age_days: 0\n").unwrap(), ..Default::default() }
